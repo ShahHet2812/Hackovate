@@ -1,4 +1,3 @@
-# p1.py
 import os
 import io
 import json
@@ -18,6 +17,7 @@ from langchain.schema.messages import HumanMessage, AIMessage, SystemMessage
 from dotenv import load_dotenv
 
 load_dotenv()
+
 # -----------------------------
 # Page config
 # -----------------------------
@@ -27,7 +27,7 @@ st.set_page_config(
 
 
 # -----------------------------
-# Utility / Safety helpers
+# Utility helpers
 # -----------------------------
 def safe_set_env_api_key(key: str):
     """Set GOOGLE_API_KEY env var if provided (keeps key out of code)."""
@@ -43,24 +43,18 @@ def safe_transform_column(le, series: pd.Series) -> pd.Series:
     if series is None:
         return series
     try:
-        # Try direct transform first
         return pd.Series(le.transform(series), index=series.index)
     except Exception:
-        # Fallback mapping for LabelEncoder-like objects
         if hasattr(le, "classes_"):
-            classes = list(le.classes_)
 
             def map_val(v):
                 try:
-                    # index in classes_ is the label encoding used by LabelEncoder
                     return int(np.where(le.classes_ == v)[0][0])
                 except Exception:
                     return -1
 
             return series.map(map_val).astype(int)
-        else:
-            # Last resort: return original values (model may error; we keep safety)
-            return series
+        return series
 
 
 def reindex_with_defaults(df: pd.DataFrame, columns: list, default=0):
@@ -79,9 +73,7 @@ def get_disease_info(disease: str) -> dict:
     try:
         llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
     except Exception as e:
-        return {
-            "error": f"Failed to initialize language model. Check API key. Details: {e}"
-        }
+        return {"error": f"Failed to initialize language model. Details: {e}"}
 
     prompt = PromptTemplate(
         input_variables=["disease"],
@@ -98,36 +90,20 @@ Return a JSON response according to these rules:
   "message": "The cattle is healthy and has no signs of any disease."
 }}
 
-2. If the input is a known cattle disease, return this full structure with real data filled:
+2. If the input is a known cattle disease, return this structure:
 {{
   "disease": "{{disease}}",
-  "overview": "<A brief, farmer-friendly overview of the disease and its cause>",
-  "harmful_effects": [
-    "<Effect 1>",
-    "<Effect 2>",
-    "<Effect 3>"
-  ],
-  "prevention": [
-    "<Preventive measure 1>",
-    "<Preventive measure 2>",
-    "<Preventive measure 3>"
-  ],
-  "treatment": [
-    "<Treatment or medication 1>",
-    "<Treatment or medication 2>",
-    "<Treatment or medication 3>"
-  ]
+  "overview": "<Brief overview>",
+  "harmful_effects": ["<Effect 1>", "<Effect 2>", "<Effect 3>"],
+  "prevention": ["<Measure 1>", "<Measure 2>", "<Measure 3>"],
+  "treatment": ["<Treatment 1>", "<Treatment 2>", "<Treatment 3>"]
 }}
 
-3. If the input is not a valid or known cattle disease, or is irrelevant text, return exactly:
+3. If unknown, return:
 {{
   "disease": "{{disease}}",
-  "message": "No specific information found for this disease. Please consult a professional veterinarian."
+  "message": "No specific information found. Please consult a professional veterinarian."
 }}
-
-**Rules**
-- Return ONLY valid JSON (no text outside the JSON object).
-- Provide 3-4 items for each list where applicable.
 """,
     )
     agent = prompt | llm
@@ -136,7 +112,7 @@ Return a JSON response according to these rules:
         cleaned = response_content.strip().replace("```json", "").replace("```", "")
         return json.loads(cleaned)
     except Exception as e:
-        return {"error": f"Could not retrieve or parse advice: {str(e)}"}
+        return {"error": f"Could not retrieve advice: {str(e)}"}
 
 
 # -----------------------------
@@ -146,25 +122,39 @@ Return a JSON response according to these rules:
 def load_artifacts():
     """Load all model artifacts from models/ directory (joblib)."""
     models_dir = "models"
-    return {
-        "yield_model": joblib.load(os.path.join(models_dir, "yield_model.joblib")),
-        "yield_encoders": joblib.load(
+    artifacts = {}
+    try:
+        artifacts["yield_model"] = joblib.load(
+            os.path.join(models_dir, "yield_model.joblib")
+        )
+        artifacts["yield_encoders"] = joblib.load(
             os.path.join(models_dir, "yield_encoders.joblib")
-        ),
-        "yield_features": joblib.load(
+        )
+        artifacts["yield_features"] = joblib.load(
             os.path.join(models_dir, "yield_features.joblib")
-        ),
-        "disease_model": joblib.load(os.path.join(models_dir, "disease_model.joblib")),
-        "disease_encoders": joblib.load(
+        )
+        artifacts["disease_model"] = joblib.load(
+            os.path.join(models_dir, "disease_model.joblib")
+        )
+        artifacts["disease_encoders"] = joblib.load(
             os.path.join(models_dir, "disease_encoders.joblib")
-        ),
-        "disease_target_encoder": joblib.load(
+        )
+        artifacts["disease_target_encoder"] = joblib.load(
             os.path.join(models_dir, "disease_target_encoder.joblib")
-        ),
-        "disease_features": joblib.load(
+        )
+        artifacts["disease_features"] = joblib.load(
             os.path.join(models_dir, "disease_features.joblib")
-        ),
-    }
+        )
+        # metrics (optional)
+        try:
+            artifacts["metrics"] = joblib.load(
+                os.path.join(models_dir, "metrics.joblib")
+            )
+        except Exception:
+            artifacts["metrics"] = None
+    except Exception as e:
+        raise e
+    return artifacts
 
 
 @st.cache_data
@@ -185,7 +175,11 @@ def load_ui_data():
 # PDF report generator
 # -----------------------------
 def generate_report(
-    input_data: dict, predicted_yield: float, predicted_disease: str, advice: dict
+    input_data: dict,
+    predicted_yield: float,
+    predicted_disease: str,
+    advice: dict,
+    metrics: dict,
 ):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
@@ -195,9 +189,9 @@ def generate_report(
     story.append(Paragraph("🐄 Cattle Analytics & Prediction Report", styles["Title"]))
     story.append(Spacer(1, 12))
 
+    # Input Data
     story.append(Paragraph("📌 Input Data Provided", styles["Heading2"]))
-    input_table = [["Field", "Value"]]
-    input_table += [[k, str(v)] for k, v in input_data.items()]
+    input_table = [["Field", "Value"]] + [[k, str(v)] for k, v in input_data.items()]
     table = Table(input_table, colWidths=[200, 260])
     table.setStyle(
         TableStyle(
@@ -211,6 +205,7 @@ def generate_report(
     story.append(table)
     story.append(Spacer(1, 12))
 
+    # Predictions
     story.append(Paragraph("📈 AI Predictions", styles["Heading2"]))
     story.append(
         Paragraph(
@@ -225,6 +220,24 @@ def generate_report(
     )
     story.append(Spacer(1, 12))
 
+    # Validation Metrics (flat values only ✅)
+    story.append(Paragraph("📊 Model Validation Metrics", styles["Heading2"]))
+    if metrics:
+        story.append(
+            Paragraph(
+                f"Milk Yield RMSE: {metrics.get('yield_rmse', 0):.2f} L",
+                styles["Normal"],
+            )
+        )
+        story.append(
+            Paragraph(
+                f"Disease Detection F1 Score: {metrics.get('disease_f1', 0):.2f}",
+                styles["Normal"],
+            )
+        )
+    story.append(Spacer(1, 12))
+
+    # Advice Section
     story.append(Paragraph("🩺 AI Veterinary Advisor", styles["Heading2"]))
     if "error" in advice:
         story.append(Paragraph(f"⚠️ {advice['error']}", styles["Normal"]))
@@ -234,22 +247,18 @@ def generate_report(
         if advice.get("overview"):
             story.append(Paragraph("<b>Overview</b>", styles["Heading3"]))
             story.append(Paragraph(advice["overview"], styles["Normal"]))
-            story.append(Spacer(1, 8))
         if advice.get("harmful_effects"):
             story.append(Paragraph("<b>Harmful Effects</b>", styles["Heading3"]))
             for e in advice["harmful_effects"]:
                 story.append(Paragraph(f"- {e}", styles["Normal"]))
-            story.append(Spacer(1, 8))
         if advice.get("prevention"):
             story.append(Paragraph("<b>Prevention</b>", styles["Heading3"]))
             for p in advice["prevention"]:
                 story.append(Paragraph(f"- {p}", styles["Normal"]))
-            story.append(Spacer(1, 8))
         if advice.get("treatment"):
             story.append(Paragraph("<b>Treatment Options</b>", styles["Heading3"]))
             for t in advice["treatment"]:
                 story.append(Paragraph(f"- {t}", styles["Normal"]))
-            story.append(Spacer(1, 8))
 
     story.append(Spacer(1, 12))
     story.append(
@@ -258,6 +267,7 @@ def generate_report(
             styles["Italic"],
         )
     )
+
     doc.build(story)
     buffer.seek(0)
     return buffer
@@ -268,9 +278,8 @@ def generate_report(
 # -----------------------------
 st.sidebar.title("Cattle Analytics")
 
-# API key entry (password style)
+# API key (via .env)
 api_key_input = os.getenv("API_KEY")
-
 if api_key_input:
     safe_set_env_api_key(api_key_input)
 
@@ -290,27 +299,25 @@ st.sidebar.markdown("- Switch to **Veterinary Chatbot** for follow-up questions.
 if page == "Prediction Platform":
     st.title("🐄 Cattle Analytics & Prediction Platform")
     st.markdown(
-        "Enter cattle details below to predict **milk yield** and **health status**. Predictions are local and model-based. "
+        "Enter cattle details below to predict **milk yield** and **health status**. Predictions are local and model-based."
     )
 
-    # Load necessary artifacts & UI options
+    # Load artifacts and UI data
     try:
         with st.spinner("Loading models and UI data..."):
             artifacts = load_artifacts()
             ui_options = load_ui_data()
     except FileNotFoundError:
         st.error(
-            "Model files or CSV not found in project directory. Ensure `models/` folder and CSV are present."
+            "Model files or CSV not found. Ensure `models/` folder and CSV are present."
         )
         st.stop()
     except Exception as e:
         st.error(f"Failed to load artifacts: {e}")
         st.stop()
 
-    # Sidebar inputs (full set restored)
+    # Sidebar inputs (full)
     st.sidebar.header("Enter Cattle Details")
-
-    # Core Info
     breed = st.sidebar.selectbox("Breed", ui_options["Breed"])
     age = st.sidebar.number_input("Age (Months)", min_value=1, max_value=240, value=60)
     weight = st.sidebar.number_input(
@@ -323,7 +330,6 @@ if page == "Prediction Platform":
         "Previous Week Avg. Yield (L)", 0.0, 50.0, 15.0, 0.1
     )
 
-    # Feed & Behavior
     st.sidebar.subheader("Feed & Behavior")
     feed_type = st.sidebar.selectbox("Feed Type", ui_options["Feed_Type"])
     feed_qty = st.sidebar.number_input("Feed Quantity (kg/day)", 1.0, 50.0, 15.0, 0.1)
@@ -338,7 +344,6 @@ if page == "Prediction Platform":
     )
     resting = st.sidebar.number_input("Resting Hours (hrs/day)", 0.0, 16.0, 9.0, 0.1)
 
-    # Environment & Vitals
     st.sidebar.subheader("Environment & Health Vitals")
     region = st.sidebar.selectbox("Region", ui_options["Region"])
     climate = st.sidebar.selectbox("Climate Zone", ui_options["Climate_Zone"])
@@ -359,7 +364,6 @@ if page == "Prediction Platform":
     heart_rate = st.sidebar.number_input("Heart Rate (bpm)", 40, 120, 60)
     resp_rate = st.sidebar.number_input("Respiratory Rate (breaths/min)", 10, 50, 30)
 
-    # Vaccinations
     st.sidebar.subheader("Vaccination Status")
     vac_cols = st.sidebar.columns(2)
     fmd_vac = vac_cols[0].checkbox("FMD", True)
@@ -371,12 +375,10 @@ if page == "Prediction Platform":
     bvd_vac = vac_cols[0].checkbox("BVD", True)
     rabies_vac = vac_cols[1].checkbox("Rabies", True)
 
-    # Buttons
     col_pred, col_clear = st.columns([2, 1])
     predict_now = col_pred.button("✨ Predict Now", use_container_width=True)
     clear_pred = col_clear.button("🧹 Clear Prediction", use_container_width=True)
 
-    # Build input_data (complete set expected by the models)
     input_data = {
         "Breed": breed,
         "Age_Months": age,
@@ -412,44 +414,43 @@ if page == "Prediction Platform":
         "Previous_Week_Avg_Yield": prev_yield,
     }
 
-    # Clear stored prediction if requested
     if clear_pred:
-        for k in ["prediction_result", "shap_df", "last_input_hash"]:
+        for k in ["prediction_result", "shap_df"]:
             if k in st.session_state:
                 del st.session_state[k]
         st.success("Cleared previous prediction.")
-        st.rerun()
+        st.experimental_rerun()
 
-    # Prediction flow (only when user presses Predict Now)
+    # Prediction flow
     if predict_now:
         with st.spinner("Processing predictions..."):
-            # Prepare dataframes
+            # DataFrames for models
             yield_df = pd.DataFrame([input_data])
             disease_df = pd.DataFrame([input_data])
 
-            # Apply encoders safely for yield model
+            # Encode categorical for yield model
             for col, le in artifacts["yield_encoders"].items():
                 if col in yield_df.columns:
                     yield_df[col] = safe_transform_column(le, yield_df[col])
 
-            # Ensure all columns required by the yield model are present (fill missing with 0)
+            # Reindex to required features
             yield_ready = yield_df.reindex(
                 columns=artifacts["yield_features"], fill_value=0
             )
 
-            # Prediction
+            # Predict yield
             try:
                 predicted_yield = float(
                     artifacts["yield_model"].predict(yield_ready)[0]
                 )
             except Exception as e:
                 st.error(f"Yield prediction failed: {e}")
-                predicted_yield = float(0.0)
+                predicted_yield = 0.0
 
             # Add predicted yield to disease df
             disease_df["Milk_Yield_L"] = predicted_yield
 
-            # Apply encoders safely for disease model
+            # Encode categorical for disease model
             for col, le in artifacts["disease_encoders"].items():
                 if col in disease_df.columns:
                     disease_df[col] = safe_transform_column(le, disease_df[col])
@@ -458,7 +459,7 @@ if page == "Prediction Platform":
                 columns=artifacts["disease_features"], fill_value=0
             )
 
-            # Disease prediction (encoded -> inverse transform)
+            # Disease prediction
             try:
                 pred_enc = artifacts["disease_model"].predict(disease_ready)[0]
                 predicted_disease = artifacts[
@@ -467,26 +468,26 @@ if page == "Prediction Platform":
             except Exception as e:
                 st.error(f"Disease prediction failed: {e}")
                 predicted_disease = "Unknown"
+                pred_enc = None
 
-            # Save results in session_state so they persist across reruns and navigation
+            # Save results
             st.session_state.prediction_result = {
                 "input_data": input_data,
                 "predicted_yield": predicted_yield,
                 "predicted_disease": predicted_disease,
-                "pred_enc": int(pred_enc) if "pred_enc" in locals() else None,
+                "pred_enc": int(pred_enc) if pred_enc is not None else None,
             }
 
-            # Fetch veterinary advice (LLM)
+            # Fetch advice (LLM)
             with st.spinner("Fetching AI veterinary advice..."):
                 advice = get_disease_info(predicted_disease)
             st.session_state.prediction_result["advice"] = advice
 
-            # Compute SHAP for disease prediction only if not healthy and if model supports TreeExplainer
+            # SHAP explanation (if applicable)
             if str(predicted_disease).lower() != "healthy":
                 try:
                     explainer = shap.TreeExplainer(artifacts["disease_model"])
                     explanation = explainer(disease_ready)
-                    # Handle multiclass vs single
                     if hasattr(explanation, "values"):
                         vals = explanation.values
                         if (
@@ -494,12 +495,10 @@ if page == "Prediction Platform":
                             and st.session_state.prediction_result.get("pred_enc")
                             is not None
                         ):
-                            # (samples, features, classes) -> select class
                             class_vals = vals[
                                 0, :, st.session_state.prediction_result["pred_enc"]
                             ]
                         else:
-                            # (samples, features)
                             class_vals = vals[0, :]
                         feature_names = getattr(
                             explanation, "feature_names", disease_ready.columns.tolist()
@@ -514,7 +513,7 @@ if page == "Prediction Platform":
 
         st.success("Prediction complete — results saved.")
 
-    # Show stored prediction if present
+    # Show stored prediction and metrics
     if "prediction_result" in st.session_state:
         res = st.session_state.prediction_result
         st.subheader("📈 AI Prediction Results")
@@ -522,7 +521,33 @@ if page == "Prediction Platform":
         col1.metric("Predicted Milk Yield", f"{res['predicted_yield']:.2f} L/day")
         col2.metric("Predicted Health Status", str(res["predicted_disease"]))
 
-        # SHAP visualization (if available)
+        # Show model validation metrics if available
+        metrics = artifacts.get("metrics")
+        if metrics:
+            st.subheader("📊 Model Validation Metrics (test set)")
+            st.metric(
+                "Milk Yield RMSE (test)", f"{metrics.get('yield_rmse', 'N/A'):.3f} L"
+            )
+            st.metric(
+                "Disease Detection F1 (test)", f"{metrics.get('disease_f1', 'N/A'):.3f}"
+            )
+
+            # classification report expander
+            if metrics.get("disease_classification_report"):
+                with st.expander("🔍 Disease classification report (detailed)"):
+                    cr = metrics["disease_classification_report"]
+                    # Convert to DataFrame for display
+                    try:
+                        cr_df = pd.DataFrame(cr).T
+                        st.dataframe(cr_df)
+                    except Exception:
+                        st.write(cr)
+        else:
+            st.warning(
+                "Model validation metrics not found. Run `train_models.py` to generate metrics.joblib."
+            )
+
+        # SHAP visualization
         if "shap_df" in st.session_state and st.session_state.shap_df is not None:
             shap_df = st.session_state.shap_df.copy()
             positive = shap_df[shap_df["contribution"] > 0].head(7)
@@ -555,17 +580,21 @@ if page == "Prediction Platform":
                     st.markdown(f"- {p}")
             if advice.get("treatment"):
                 st.success("💊 Treatment Options")
-                for t in advice["treatment"]:
-                    st.markdown(f"- {t}")
+                for t_item in advice["treatment"]:
+                    st.markdown(f"- {t_item}")
 
         st.info(
             "ℹ️ Disclaimer: This is an AI prediction and not a substitute for professional veterinary advice."
         )
         st.divider()
 
-        # Report download
+        # Report download (include metrics)
         pdf_buffer = generate_report(
-            res["input_data"], res["predicted_yield"], res["predicted_disease"], advice
+            res["input_data"],
+            res["predicted_yield"],
+            res["predicted_disease"],
+            res["advice"],
+            artifacts["metrics"],
         )
         st.download_button(
             label="📥 Download Prediction Report (PDF)",
@@ -593,7 +622,6 @@ elif page == "Veterinary Chatbot":
             }
         ]
 
-    # Layout: chat column + tips column
     chat_col, tips_col = st.columns([3, 1])
     with chat_col:
         # Display chat messages
@@ -603,14 +631,12 @@ elif page == "Veterinary Chatbot":
 
         # Input
         if user_input := st.chat_input("Ask about cattle health, symptoms, or feed..."):
-            # Append user message
             st.session_state.chat_messages.append(
                 {"role": "user", "content": user_input}
             )
             with st.chat_message("user"):
                 st.markdown(user_input)
 
-            # Generate assistant response
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
                     try:
@@ -618,29 +644,14 @@ elif page == "Veterinary Chatbot":
                             model="gemini-2.5-flash", temperature=0.3
                         )
 
-                        # System prompt guiding the assistant (farmer-friendly)
                         system_prompt = """
-                    You are an AI Veterinary Assistant specializing in cattle. Your role is to provide farmers with accurate, clear, and practical guidance on cattle health, nutrition, diseases, breeding, milk yield, and overall well-being. Explanations must always be simple enough for farmers to understand, while still precise, reliable, and culturally appropriate.
+You are an AI Veterinary Assistant specializing in cattle. Provide concise, practical, farmer-friendly advice. If outside scope, advise consulting a veterinarian.
 
-                    RULES:
-                    1. ALWAYS be compassionate, respectful, and polite when responding.
-                    2. Keep every response focused ONLY on cattle-related issues: health, feeding, breeding, disease prevention, treatment support, housing, and general management.
-                    3. Provide advice in a structured format:
-                    a) Brief summary of the issue
-                    b) Practical steps farmers can take
-                    c) Prevention tips or additional advice (if applicable)
-                    4. Adapt explanations to the farmer’s preferred language (example: Hindi, Kannada, Tamil, Telugu, etc.) whenever requested, while keeping the response farmer-friendly and avoiding unnecessary technical jargon.
-                    5. When local language is used, provide both:
-                    - The native script
-                    - Romanized/pronunciation form in parentheses
-                    Example: [translate:दूध उत्पादन बढ़ाने के उपाय] (Doodh utpadan badhane ke upaay)
-                    6. Always be clear, accurate, and avoid giving unsafe or unverified treatments. For medicines or serious illness, instruct farmers to consult a professional veterinarian.
-                    7. If the query is outside cattle farming, politely decline to answer.
-                    8. CRITICAL: At the end of EVERY response, include this exact disclaimer:
+At the end of every reply include:
 
-                    ---
-                    Disclaimer: I am an AI assistant and not a substitute for professional veterinary advice. Always consult a qualified veterinarian for diagnosis and treatment.
-                    """
+---
+Disclaimer: I am an AI assistant and not a substitute for professional veterinary advice. Always consult a qualified veterinarian for diagnosis and treatment.
+"""
                         chat_history = [SystemMessage(content=system_prompt)]
                         for msg in st.session_state.chat_messages:
                             if msg["role"] == "user":
@@ -652,21 +663,19 @@ elif page == "Veterinary Chatbot":
 
                         response = llm.invoke(chat_history)
                         assistant_response = response.content
-
                     except Exception as e:
                         assistant_response = (
                             f"Sorry, an error occurred while contacting the AI: {e}"
                         )
                         st.error(assistant_response)
 
-                # Ensure disclaimer exists (if model didn't add it)
-                if (
-                    "---" not in assistant_response
-                    and "Disclaimer:" not in assistant_response
+                # Ensure disclaimer
+                if ("---" not in assistant_response) and (
+                    "Disclaimer:" not in assistant_response
                 ):
                     assistant_response = (
                         assistant_response
-                        + "\n\n---\n*Disclaimer: I am an AI assistant and not a substitute for professional veterinary advice. Always consult a qualified veterinarian for diagnosis and treatment.*"
+                        + "\n\n---\nDisclaimer: I am an AI assistant and not a substitute for professional veterinary advice. Always consult a qualified veterinarian for diagnosis and treatment."
                     )
 
                 st.markdown(assistant_response)
