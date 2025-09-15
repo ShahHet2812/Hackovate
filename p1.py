@@ -419,7 +419,7 @@ if page == "Prediction Platform":
             if k in st.session_state:
                 del st.session_state[k]
         st.success("Cleared previous prediction.")
-        st.experimental_rerun()
+        st.rerun()
 
     # Prediction flow
     if predict_now:
